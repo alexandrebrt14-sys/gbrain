@@ -193,3 +193,73 @@ When a cross or judge call fails:
 2. **Cost estimators must account for actual data cardinality, not just configured parameters.** The estimate used `m=12` but the real far set was `|prefixes|`.
 3. **Every LLM-calling function needs a budget.** This isn't just a brainstorm problem — it's an architectural gap in any system that makes variable numbers of LLM calls based on data size.
 4. **JSON serialization of user content is a landmine.** Any page could contain invalid Unicode. Sanitize at the serialization boundary, not per-feature.
+
+## Shipped in v0.37.x (the budget cathedral wave)
+
+P1-P4 already shipped via PR #1234 (the first fix wave). P5-P7 plus a few
+architectural rounds shipped in the budget-cathedral wave that followed:
+
+- **P1 (far set cap):** `fetchFar()` in `src/core/brainstorm/domain-bank.ts`
+  caps prefix sampling to `max(m*4, 50)` and trims final pages to `m` by
+  distance. The 2K-prefix explosion class is closed.
+- **P2 (cost guardrails):** `--max-cost`, `--max-far-set`, `--strict-budget`,
+  `--judge-model`, `--max-ideas-per-judge-call` flags on brainstorm + lsd.
+  Pre-flight estimate refusal, mid-run cost-ceiling abort.
+- **P3 (judge chunking):** `runJudge` in `src/core/brainstorm/judges.ts`
+  auto-chunks at 100 ideas/call. Context-window overflow is structurally
+  prevented.
+- **P4 (unicode sanitization):** `sanitizeUnicode` in
+  `src/core/brainstorm/orchestrator.ts` strips unpaired surrogates before
+  serialization.
+- **P5 (BudgetTracker at the gateway layer):** new
+  `src/core/budget/budget-tracker.ts` is the canonical primitive. The
+  gateway's `withBudgetTracker(tracker, fn)` composes via
+  `AsyncLocalStorage<BudgetTracker>` so every gateway-routed LLM call
+  inside the scope auto-records. `BudgetExhausted` is a typed error with
+  `reason: 'cost' | 'runtime' | 'no_pricing'`. `record()` throws when
+  cumulative spend exceeds the cap (TX1). `reserve()` hard-fails on
+  `no_pricing` when the cap is set + model missing from pricing maps (TX2).
+- **P6 (payload-fitter):** `src/core/diarize/payload-fitter.ts` with
+  `'batch'` and `'summarize'` strategies. Summarize embed-clusters
+  (k=ceil(items/4)), Haiku-summarizes each cluster in parallel via
+  `Promise.allSettled` at parallelism=4. Surfaces `degraded: true` flag
+  when success ratio < 0.75 so callers decide whether to surface a partial
+  result or abort.
+- **P7 (brainstorm checkpoint + --resume):**
+  `src/core/brainstorm/checkpoint.ts` persists FULL idea bodies (not just
+  counts — TX3 load-bearing). One `--resume <run_id>` flag covers both
+  failed and never-attempted crosses (TX4). `run_id` formula uses NO
+  embedding bits so the identity is stable across embedding-model swaps
+  (A5 amended). 7-day mtime-based GC wired into the cycle purge phase.
+  `--list-runs` lists saved checkpoints. `--force-resume` bypasses the 7d
+  staleness gate.
+
+Also shipped alongside the wave (folded inline):
+
+- **doctor --remediate --resume:** A4 amended. The mid-run cap is now a
+  real ceiling; `--max-cost` is an alias for `--max-usd`. On
+  BudgetExhausted, the orchestrator persists a checkpoint at
+  `~/.gbrain/remediation/<plan_hash>.json` and tells the user the exact
+  `gbrain doctor --remediate --resume` command. The resumed run skips
+  already-completed steps.
+- **Audit-week-file consolidation (Q1):** four call sites
+  (shell-jobs / phantoms / slug-fallback / dream-budget) now share one
+  ISO-week filename helper. Year-boundary correctness pinned by tests.
+- **eval-contradictions tracker telemetry:** the existing CostTracker
+  stays for the report shape; the runner additionally installs a
+  withBudgetTracker scope for the gateway-layer telemetry path.
+
+What did NOT make this wave (filed in TODOS for a follow-up):
+
+- The schema fix for `page_links` on PGLite. The brainstorm domain-bank
+  queries reference `page_links` but the embedded schema only defines
+  `links`; the E2E works around this with a view in test setup, but
+  real PGLite users currently can't run `gbrain brainstorm`. Schema fix
+  needed.
+- `--max-cost` flag on `extract`, `enrich`, `integrity auto`. The
+  gateway-layer enforcement covers them when wrapped at the entrypoint,
+  but the CLI flag wiring is deferred.
+- Async-batched audit writes. Sync `appendFileSync` is fine at typical
+  volumes; revisit if profiling shows it dominates.
+- Multi-day brainstorm resume (>7d). The `--force-resume` flag is the
+  operator escape hatch for now.

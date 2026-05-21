@@ -1,6 +1,33 @@
 # TODOS
 
 
+## v0.37.x brainstorm cost-cathedral follow-ups (filed during T12)
+
+- [ ] **PGLite schema fix for `page_links`.** The brainstorm domain-bank queries reference `page_links` (`src/core/pglite-engine.ts:896`, `:984`) but the embedded `src/core/pglite-schema.ts` only defines `links`. As a result, `gbrain brainstorm` against a PGLite brain fails with `relation "page_links" does not exist`. The v0.37.x E2E (`test/e2e/brainstorm-resume.test.ts`) works around this by creating `CREATE OR REPLACE VIEW page_links AS SELECT * FROM links` inside the test setup. Fix shape: either (a) add the `page_links` view at the end of `PGLITE_SCHEMA_SQL` (and as a migration that creates it on existing brains), OR (b) rewrite the two pglite-engine.ts query sites to reference `links` directly. Track Postgres parity — the same `page_links` reference also appears in `src/core/postgres-engine.ts` and works there only because the Postgres schema must have grown the view at some point. Verify-first.
+
+- [ ] **Explicit `--max-cost` flag on `gbrain extract`, `gbrain enrich`, `gbrain integrity auto`.** v0.37.x ships gateway-layer enforcement via `withBudgetTracker` — wrapping any of those commands at their entrypoint with `withBudgetTracker(tracker, fn)` immediately gives them the same cap semantics that brainstorm + doctor --remediate have. The CLI flag wiring (parse `--max-cost`, construct `BudgetTracker` with `maxCostUsd`, wrap the entrypoint) is the only missing piece. ~30 lines each plus smoke tests. Deferred per the plan's "NOT in scope" — gateway-layer composition was the structural goal; the per-command flag wiring is the next ergonomic win.
+
+- [ ] **`P5` config-schema `budgets:` block in `~/.gbrain/config.json`.** The lsd cost-explosion incident's P5 proposed declarative per-command budgets in config. v0.37.x ships the imperative `--max-cost N` surface, which covers the canonical case. Config-driven defaults (so users don't have to remember to pass `--max-cost` every time) are a v0.38+ ergonomic win. Shape:
+  ```yaml
+  budgets:
+    default:
+      max_cost_usd: 5.00
+      max_runtime_seconds: 300
+    brainstorm: { max_cost_usd: 2.00 }
+    lsd: { max_cost_usd: 5.00 }
+    dream: { max_cost_usd: 10.00 }
+  ```
+  Resolution: CLI flag > config block > built-in default.
+
+- [ ] **Multi-day brainstorm resume (>7d).** A5's 7-day mtime window covers >99% of crash-and-resume cases (an operator forgets for a week is rare). `--force-resume` is the escape hatch. The full multi-day story (longer retention, possibly a daily GC instead of cycle-purge-only, dashboard for in-flight runs) is a v0.38+ concern.
+
+- [ ] **Async-batched audit writes.** Sync `appendFileSync` is fine at typical volumes (~5ms × 100 crosses = ~500ms — not noticeable inside a $1 brainstorm run). Profiling trigger criterion: when 100+ crosses on a large brain shows audit-write time dominating wall-clock cost, switch to an async write queue. Fixing prematurely costs complexity for no measurable benefit.
+
+- [ ] **`BudgetLedger` unification with `BudgetTracker`.** `src/core/enrichment/budget.ts` defines a separate `BudgetLedger` primitive for per-day, per-scope/resolverId enrichment caps. Different shape from `BudgetTracker` (daily reset windows + multi-tier scope keys). Unification is possible but requires careful schema design to preserve enrichment's existing report semantics. Deferred because: (a) BudgetTracker covers the per-command case cleanly today, (b) the existing BudgetLedger isn't a customer-facing surface — it backs `gbrain enrich`'s internal accounting, (c) merging them would require a schema migration on the enrichment budget audit JSONL. Revisit when the enrichment surface gets its next major touch.
+
+- [ ] **judges.ts internal chunking → payload-fitter delegation.** v0.37.x ships `src/core/diarize/payload-fitter.ts` with the batch strategy ready to consume from `src/core/brainstorm/judges.ts`'s `runJudge` chunking path. Today judges.ts keeps its own copy of the chunking loop (~30 lines) — straightforward refactor: replace the inline split with `fit({strategy:'batch', items: ideas, maxTokensPerCall, estimateTokens})` and concatenate results. The cost-guardrails test suite already pins the public contract; the refactor is mechanical. Touch one function; trivial.
+
+
 ## v0.37.8.0 pre-existing master test regression (noticed during ship)
 
 - [ ] **P0: `test/doctor-report-remote.test.ts:65` — `full report on healthy brain` fails with `health_score: 50` (expects `>=70`).** Reproduces in isolation on fresh PGLite. Introduced by master's v0.37.3.0 (#1215, `skill_brain_first` doctor check) which appears to return non-ok on freshly-initialized test brains, dropping the composite health score below the test's threshold. Fix shape: either (a) `skill_brain_first` should return `ok` (or `n/a`) on empty/test brains with no user-authored skills, OR (b) `doctor-report-remote.test.ts:68` should seed the skills directory before computing the score, OR (c) downgrade `skill_brain_first` non-ok to a check that doesn't penalize the score on fresh brains. Owner: maintainer of #1215. Noticed during /ship of garrytan/kolkata-v3 → v0.37.8.0.

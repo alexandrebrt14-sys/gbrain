@@ -26,8 +26,12 @@
  *   relaxed per-caller.
  */
 
-import type { ChatResult } from '../ai/gateway.ts';
-import type { ChatFn } from '../brainstorm/judges.ts';
+import type { ChatOpts, ChatResult } from '../ai/gateway.ts';
+
+/** Local ChatFn shape — kept here so payload-fitter doesn't depend on
+ *  src/core/brainstorm/judges.ts (which is the canonical owner of the
+ *  ChatFn alias today). */
+type ChatFn = (opts: ChatOpts) => Promise<ChatResult>;
 
 export type FitStrategy = 'batch' | 'summarize';
 
