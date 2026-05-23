@@ -47,7 +47,7 @@ import {
   resolveParallelism,
   buildSyncStatusReport,
 } from '../src/commands/sync.ts';
-import { SYNC_LOCK_ID } from '../src/core/db-lock.ts';
+import { SYNC_LOCK_ID, syncLockId } from '../src/core/db-lock.ts';
 import { withSourcePrefix, slog } from '../src/core/console-prefix.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 
@@ -92,33 +92,33 @@ describe('resolveParallelism', () => {
 // ── lock-identity invariant (D8) ─────────────────────────────────────
 
 describe('per-source lock id (D8 — Codex P0 #1 fix)', () => {
-  test('per-source lock id format is namespaced under SYNC_LOCK_ID', () => {
-    // Two sources -> two distinct lock ids. Each is namespaced under the
-    // canonical SYNC_LOCK_ID so any future global-lock tooling still
-    // finds them.
-    const idA = `${SYNC_LOCK_ID}:source-a`;
-    const idB = `${SYNC_LOCK_ID}:source-b`;
+  test('per-source lock id format is namespaced via syncLockId helper', () => {
+    // v0.40.5.0 (master) introduced syncLockId(sourceId) as the canonical
+    // helper. v0.40.6.0 (this branch) builds on it. Two sources -> two
+    // distinct lock ids. SYNC_LOCK_ID = syncLockId('default') is a
+    // back-compat alias for the legacy single-source path.
+    const idA = syncLockId('source-a');
+    const idB = syncLockId('source-b');
     expect(idA).not.toBe(idB);
-    expect(idA.startsWith(`${SYNC_LOCK_ID}:`)).toBe(true);
-    expect(idB.startsWith(`${SYNC_LOCK_ID}:`)).toBe(true);
-    // Distinct from the global lock so the cycle's gbrain-sync acquire
+    // Distinct from the default lock so the cycle's default-source acquire
     // doesn't block a per-source `sync --all` worker.
     expect(idA).not.toBe(SYNC_LOCK_ID);
+    expect(idA).not.toBe(syncLockId('default'));
   });
 
   test('source.id only — newline injection through source.name is impossible', () => {
-    // D13 fix: log prefix uses source.id (slug-validated by `sources add`),
-    // NOT source.name (free-form text accepted by --name). This pins the
-    // contract that the lock id derives from .id so adversarial names
-    // can't smuggle in a colon, newline, or control character.
+    // D13 fix: lock id derives from source.id (slug-validated by `sources
+    // add`), NOT source.name (free-form text accepted by --name). This
+    // pins the contract that adversarial names can't smuggle in newlines
+    // or control characters into the lock id.
     const sourceWithEvilName = {
       id: 'media-corpus',
       name: 'evil\nname: hijacked\n[other-source]',
     };
-    const lockId = `${SYNC_LOCK_ID}:${sourceWithEvilName.id}`;
-    expect(lockId).toBe('gbrain-sync:media-corpus');
+    const lockId = syncLockId(sourceWithEvilName.id);
     expect(lockId).not.toContain('\n');
     expect(lockId).not.toContain('evil');
+    expect(lockId).toContain('media-corpus');
   });
 });
 
