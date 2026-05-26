@@ -1,5 +1,5 @@
 /**
- * v0.41.13.0 — Migration v97 round-trip test.
+ * v0.41.13.0 — Migration v98 round-trip test.
  *
  * Verifies the `conversation_parser_llm_cache` table:
  *   - is created on schema init
@@ -33,7 +33,7 @@ beforeEach(async () => {
   await resetPgliteState(engine);
 });
 
-describe('migration v97 — conversation_parser_llm_cache', () => {
+describe('migration v98 — conversation_parser_llm_cache', () => {
   test('table exists after schema init', async () => {
     const rows = await engine.executeRaw<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables

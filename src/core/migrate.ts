@@ -4503,8 +4503,61 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 97,
+    name: 'pages_dedup_partial_index',
+    // v0.41.13 (#1309) — partial index for findDuplicatePage's hot path.
+    //
+    // Codex review of the original plan caught "no new index is hand-wavy":
+    // findDuplicatePage runs once per imported file. On a 100K-page brain
+    // syncing thousands of files, an unindexed sequential scan per
+    // invocation is O(n²) on import wallclock.
+    //
+    // Partial index excludes soft-deleted rows so the same-source dedup
+    // path (which already filters `deleted_at IS NULL`) gets an index-only
+    // scan. Composite key matches the WHERE clause shape.
+    //
+    // Postgres-only: PGLite has no concurrent writers, so the engine-wide
+    // SHARE lock that motivates CONCURRENTLY doesn't apply. PGLite
+    // re-uses plain CREATE INDEX via the `sqlFor.pglite` branch.
+    //
+    // The Postgres path uses CREATE INDEX CONCURRENTLY (with `transaction:
+    // false` so postgres.js doesn't wrap an implicit BEGIN) and pre-drops
+    // any invalid remnant from a prior failed CONCURRENTLY attempt.
+    sql: '',
+    transaction: false,
+    handler: async (engine) => {
+      if (engine.kind === 'postgres') {
+        await engine.runMigration(
+          97,
+          `DO $$ BEGIN
+             IF EXISTS (
+               SELECT 1 FROM pg_index i
+               JOIN pg_class c ON c.oid = i.indexrelid
+               WHERE c.relname = 'pages_dedup_idx' AND NOT i.indisvalid
+             ) THEN
+               EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS pages_dedup_idx';
+             END IF;
+           END $$;`
+        );
+        await engine.runMigration(
+          97,
+          `CREATE INDEX CONCURRENTLY IF NOT EXISTS pages_dedup_idx
+             ON pages (source_id, content_hash)
+             WHERE deleted_at IS NULL;`
+        );
+      } else {
+        await engine.runMigration(
+          97,
+          `CREATE INDEX IF NOT EXISTS pages_dedup_idx
+             ON pages (source_id, content_hash)
+             WHERE deleted_at IS NULL;`
+        );
+      }
+    },
+  },
+  {
+    version: 98,
     name: 'conversation_parser_llm_cache_table',
-    // v0.41.13.0 — content-hash-keyed cache for the conversation
+    // v0.41.15.0 — content-hash-keyed cache for the conversation
     // parser's LLM polish + fallback calls. Per D17 (codex outside
     // voice), there is NO conversation_parser_inferred_patterns
     // table: persisting LLM-inferred regex from a 20-line sample
@@ -4521,13 +4574,8 @@ export const MIGRATIONS: Migration[] = [
     //   - call_shape: 'polish' | 'fallback' so the same content
     //     can be cached differently per call kind.
     //
-    // value_json carries the parsed-message array (polish or
-    // fallback output) as JSONB. Schema_version stamped in the
-    // value object lets us evolve the shape without re-running
-    // migrations.
-    //
-    // Best-effort: this is operational cache, not source of
-    // truth. Drop and rebuild whenever cost economics shift.
+    // Slot history: originally v97, bumped to v98 after master's
+    // v0.41.13.0 (#1422 fix-wave) claimed v97 for the dedup index.
     sql: `
       CREATE TABLE IF NOT EXISTS conversation_parser_llm_cache (
         content_sha256 TEXT NOT NULL,

@@ -56,6 +56,7 @@ CHECKS=(
   "check:gateway-routed"
   "check:fixture-privacy"
   "check:conversation-parser"
+  "check:resolver"
   "typecheck"
 )
 
