@@ -2,6 +2,171 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.41.22.0] - 2026-05-27
+
+**Your brain runs on a real taxonomy now. Not 94 types of cruft. Fifteen
+canonical types you can name, plus a catch-all for the long tail.**
+
+A real production brain (186K pages) had accreted **94 distinct
+`pages.type` values** in 9 clusters of redundancy: tweet / tweet-thread
+/ tweet-bundle / tweet-single all coexisting, 5.5K concept-redirect
+pages bloating orphan counts, atom-partner-link pages that should be
+real link rows, company / yc-company / product / organization all
+fighting for the same idea. The type system is the foundation for
+schema packs, search filtering, extract behavior, enrichment routing,
+and expert routing. When types are noisy, every downstream feature
+degrades.
+
+This release ships the cathedral that collapses 94 → 14 canonical types
+(plus `note` as the catch-all = 15 total) on any brain that opts in.
+Run `gbrain onboard --check --explain` and see exactly which pages
+would move where. Run `gbrain jobs submit unify-types --allow-protected
+--params '{"target_pack":"gbrain-base-v2"}'` and the migration runs
+end-to-end: retypes pages, creates alias rows, converts edge-shaped
+pages into real link rows, then flips the active pack. Reversible via
+72h soft-delete TTL on alias/link pages + `frontmatter.legacy_type`
+preservation on retyped pages.
+
+What you can do that you couldn't before:
+
+- `gbrain init` now defaults to `gbrain-base-v2` (15 canonical types).
+  Override with `--schema-pack gbrain-base` for the legacy 24-type pack.
+  Banner prints the active pack on init so the choice is visible.
+- `gbrain onboard --check` surfaces THREE new checks alongside the
+  v0.41.18 four: `pack_upgrade_available` (your brain is on a pack with
+  a declared successor), `type_proliferation` (pack-aware ratio:
+  declared+5 warn, declared×2 fail — no false positives on custom
+  packs), `dangling_aliases` (source-scoped JOIN; no cross-source false
+  positives per codex F12).
+- `gbrain onboard --check --explain` runs the unify-types handler in
+  dry-run mode and prints the per-cluster narrative: how many pages
+  would retype, how many edge pages would convert to links, how many
+  redirects would become aliases. Trust UX delta vs a blob diff.
+- `gbrain jobs submit unify-types --allow-protected --params
+  '{"target_pack":"gbrain-base-v2"}'` runs the migration. PROTECTED
+  Minion handler — autopilot will NOT auto-fire it. Manual_only by
+  design (D17: taxonomy is user judgment).
+- Wikilinks like `[[old-redirect-slug]]` keep working after the
+  migration via `engine.resolveSlugWithAlias` short-circuit. The
+  slug_aliases table IS the resolver (D15: codex outside voice — don't
+  rewrite body text; the alias table is the right primitive).
+- Search ranking gains an `alias_resolved_boost` (1.05x) stage that
+  fires when a result's slug is a canonical of one or more aliases.
+  Lets canonicals outrank fuzzy matches that hit aliases by accident.
+
+The mapping_rules system makes the migration declarative:
+- `retype: from_type → to_type with subtype` retypes pages and stamps
+  `frontmatter.subtype` (plus always `frontmatter.legacy_type` for
+  rollback per D8). Strict allowlist on subtype_field
+  (`{subtype, legacy_type, origin, format, kind, period, domain}`)
+  prevents third-party packs from injecting `title` or `slug` via
+  mapping_rules (codex D9 security hardening).
+- `page_to_link: from_type → links table row` converts edge-shaped
+  pages (atom-partner-link, symlink) into real link rows.
+- `page_to_alias: from_type → slug_aliases row` converts redirect
+  pages into authoritative pointers.
+- Catch-all sentinel (`from_type: '*unknown*'`) retypes any page whose
+  type isn't covered by an explicit rule AND isn't a page_to_link /
+  page_to_alias source. Preserves the original type as
+  `frontmatter.legacy_type`. Guarantees ≤16 distinct types post-unify
+  on ANY brain (D12).
+
+Architecture story for engineers: this plugs into the v0.41.18.0
+`gbrain onboard` cathedral as migration #6. NO new orchestrator — the
+3 new doctor checks emit `RemediationStep[]` consumed by
+`runAllOnboardChecks`, and the `unify-types` PROTECTED Minion handler
+runs the migration with the same op_checkpoint + db-lock primitives
+the other handlers use. The original plan had a parallel `gbrain
+schema unify` orchestrator; codex outside voice caught it as
+rebuilding the same cathedral under a new name. Replaced with a
+~180-LOC handler + 3 onboard checks + 2 lines added to
+`render.ts:MANUAL_ONLY_PROTECTED_JOBS`.
+
+Schema additions:
+- v104 — `slug_aliases` table: `(source_id, alias_slug,
+  canonical_slug, notes, created_at)` with UNIQUE on `(source_id,
+  alias_slug)` + CHECK no-self-reference + partial canonical index for
+  the dangling-aliases doctor check.
+
+Engine API additions:
+- `BrainEngine.resolveSlugWithAlias(slug, sourceOrSources)` — returns
+  the canonical slug if `slug` is in slug_aliases for any of the
+  provided source(s); else returns `slug` unchanged. Accepts scalar
+  sourceId OR sourceIds[] array (federated reads per F10). Multi-source
+  ambiguity emits a once-per-process `multi_match` warning + returns
+  first by array order. Defense-in-depth: pre-v104 brains without the
+  table return input unchanged via `isUndefinedTableError` predicate.
+
+Schema-pack manifest extensions:
+- `subtypes:` array per page_type (D5) drives `inferTypeAndSubtypeFromPack`.
+- `mapping_rules:` discriminated union over retype / page_to_link /
+  page_to_alias (D11+D12) — declarative migrations.
+- `migration_from:` field declares "I am the successor to (pack,
+  semver-range)" so `findPackSuccessors` can light up
+  `pack_upgrade_available` automatically.
+- `inferTypeAndSubtypeFromPack(filePath, pack, frontmatter)` overload
+  returns `{type, subtype?}` — ReDoS-guarded regex compile on
+  `path_pattern`; back-compat preserved via the legacy
+  `inferTypeFromPack` signature.
+
+KNOBS_HASH_VERSION bumped 5→6. One-time cache miss spike on upgrade
+(fills within `cache.ttl_seconds`, default 3600s) so cached pre-v0.41.22
+results don't leak past the new boost stage. Mid-deploy hit-rate dip
+is expected and self-healing.
+
+`ELIGIBLE_TYPES` for facts extraction (`src/core/facts/eligibility.ts`)
+extended with gbrain-base-v2 canonicals (`media`, `tweet`, `atom`,
+`concept`, `analysis`) so post-unify pages keep getting extracted.
+Codex F-ELIGIBLE caught the original deferred-to-v0.43 plan as a
+blocker: changing the default taxonomy while the backstop list
+hardcoded only gbrain-base's types would silently break facts
+extraction on the new canonical types. Undeferred.
+
+This wave went through CEO review + eng review + codex outside voice
+in plan mode before any code landed. 16 decisions locked (D1-D17), 12
+baseline fixes absorbed from codex (F7-F21), and 1 mid-implementation
+bug caught by the test suite (catch-all retype was claiming
+concept-redirect pages before the alias phase could process them —
+fixed before merge by extending the catch-all exclusion to also skip
+page_to_link / page_to_alias source types).
+
+Tests: 12 new test files, 82 unit/integration cases, 1 comprehensive
+E2E that seeds all 9 production clusters and asserts the full
+migration runs end-to-end (94 → ≤16 distinct types, alias rows
+created, link rows inserted, active pack flipped, idempotent re-run).
+
+### To take advantage of v0.41.22.0
+
+If you're a NEW user (no `~/.gbrain/` yet):
+1. `gbrain init` defaults to `gbrain-base-v2`. Done.
+
+If you're an EXISTING user on gbrain-base:
+1. `gbrain upgrade` — pulls v0.41.22 binaries and applies migration v104
+   (`slug_aliases` table).
+2. `gbrain onboard --check --explain` — see the per-cluster narrative
+   for the gbrain-base → gbrain-base-v2 migration. Shows you what
+   would change before you commit.
+3. `gbrain jobs submit unify-types --allow-protected --params
+   '{"target_pack":"gbrain-base-v2"}'` — run the migration. On a
+   186K-page brain expect ~10 min total runtime.
+4. `gbrain jobs follow <job_id>` — watch progress per phase.
+5. After completion: `gbrain onboard --check` should report
+   `pack_upgrade_available` and `type_proliferation` as `ok`.
+
+If you want to stay on gbrain-base for now: do nothing.
+`pack_upgrade_available` is `manual_only` — autopilot will never
+auto-fire it. Suppress the upgrade-banner with
+`GBRAIN_NO_ONBOARD_NUDGE=1` if you don't want to see it.
+
+If something goes wrong:
+- Per-page retypes preserve `frontmatter.legacy_type = <original>` so
+  rollback is one SQL UPDATE per page.
+- Page-to-alias and page-to-link soft-delete the source page with a
+  72h TTL — restore via `gbrain pages restore <slug>` within that window.
+- Active-pack flip is reversible via `gbrain schema use gbrain-base`.
+- File an issue: https://github.com/garrytan/gbrain/issues with
+  `gbrain doctor --json` output + contents of
+  `~/.gbrain/audit/schema-unify-YYYY-Www.jsonl` if it exists.
 ## [0.41.19.0] - 2026-05-26
 
 **Your dream cycle stops silently losing wiki links.**
@@ -13882,7 +14047,7 @@ Frontmatter validation surface (the 7 codes shipped):
 | `MISSING_CLOSE` | No closing `---` before first heading | Yes ... inserts `---` |
 | `YAML_PARSE` | YAML failed to parse | Sometimes |
 | `SLUG_MISMATCH` | Frontmatter `slug:` differs from path-derived slug | Yes ... removes field |
-| `NULL_BYTES` | Binary corruption (` `) | Yes ... strips bytes |
+| `NULL_BYTES` | Binary corruption (`
 | `NESTED_QUOTES` | `title: "outer "inner" outer"` shape | Yes ... switches outer to single quotes |
 | `EMPTY_FRONTMATTER` | Open + close present, nothing meaningful between | No (human review) |
 
