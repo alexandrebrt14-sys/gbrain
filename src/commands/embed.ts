@@ -381,7 +381,13 @@ async function embedPage(
   // v0.41.30: stamp provenance so a later model/dims swap is detectable as
   // stale. embedPage is the per-slug path used by `gbrain embed <slug>` AND
   // by `gbrain sync`'s post-import embed step (runEmbedCore({slugs})).
-  await engine.setPageEmbeddingSignature(slug, { sourceId, signature: currentEmbeddingSignature() });
+  // Guard: only stamp when EVERY chunk was (re)embedded this pass. If some
+  // chunks were preserved from a prior embed (unknown/old provenance), the
+  // page is mixed — don't claim it's current. `embed --all` fully re-embeds
+  // such a page and then stamps it.
+  if (toEmbed.length === chunks.length) {
+    await engine.setPageEmbeddingSignature(slug, { sourceId, signature: currentEmbeddingSignature() });
+  }
   result.embedded += toEmbed.length;
   result.pages_processed++;
   slog(`${slug}: embedded ${toEmbed.length} chunks`);
@@ -700,8 +706,12 @@ async function embedAllStale(
             token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
           }));
           await engine.upsertChunks(slug, merged, { sourceId: keySourceId });
-          // v0.41.30: stamp provenance after the page's chunks are embedded.
-          if (signature) {
+          // v0.41.30: stamp provenance after the page's chunks are embedded —
+          // but only when EVERY chunk was stale (fully re-embedded this pass).
+          // A partially-stale page keeps preserved chunks of unknown/old
+          // provenance, so don't claim it's current. (After invalidate, a
+          // signature-drifted page IS fully stale → this stamps it.)
+          if (signature && stale.length === existing.length) {
             await engine.setPageEmbeddingSignature(slug, { sourceId: keySourceId, signature });
           }
           result.embedded += stale.length;

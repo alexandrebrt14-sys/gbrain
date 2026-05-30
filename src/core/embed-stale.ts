@@ -190,8 +190,11 @@ export async function embedStaleForSource(
           token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
         }));
         await engine.upsertChunks(slug, merged, { sourceId: keySourceId });
-        // v0.41.30: stamp provenance after the page's chunks land.
-        if (signature) {
+        // v0.41.30: stamp provenance only when EVERY chunk was stale (fully
+        // re-embedded this pass) — a partially-stale page keeps preserved
+        // chunks of unknown provenance, so don't claim current. After the
+        // invalidate pass above, signature-drifted pages ARE fully stale.
+        if (signature && stale.length === existing.length) {
           await engine.setPageEmbeddingSignature(slug, { sourceId: keySourceId, signature });
         }
         result.embedded += stale.length;
