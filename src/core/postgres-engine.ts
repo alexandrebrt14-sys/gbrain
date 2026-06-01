@@ -809,7 +809,7 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
-    const conn = this._sql || db.getConnection();
+    const conn = this.sql;
     return conn.begin(async (tx) => {
       // Create a scoped engine with tx as its connection, no shared state mutation
       const txEngine = Object.create(this) as PostgresEngine;
@@ -820,7 +820,7 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async withReservedConnection<T>(fn: (conn: ReservedConnection) => Promise<T>): Promise<T> {
-    const pool = this._sql || db.getConnection();
+    const pool = this.sql;
     const reserved = await pool.reserve();
     try {
       const conn: ReservedConnection = {
@@ -4129,7 +4129,7 @@ export class PostgresEngine implements BrainEngine {
     oldRow: number,
     newRow: Omit<TakeBatchInput, 'page_id' | 'row_num' | 'superseded_by'>,
   ): Promise<{ oldRow: number; newRow: number }> {
-    const conn = this._sql || db.getConnection();
+    const conn = this.sql;
     return await conn.begin(async (tx) => {
       const [existing] = await tx`
         SELECT resolved_at FROM takes WHERE page_id = ${pageId} AND row_num = ${oldRow}

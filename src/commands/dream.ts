@@ -470,7 +470,10 @@ async function runDrain(
     } else {
       console.log(`[drain] dry-run: ${remaining ?? '?'} page(s) eligible for atom extraction (no work done)`);
     }
-    if ((remaining ?? 0) > 0) process.exit(EXIT_DRAIN_INCOMPLETE);
+    // null = the backlog count query FAILED — treat as incomplete, never as
+    // "drained" (Codex: `remaining ?? 0` would exit 0 on a failed count and
+    // make automation believe the backlog cleared when it was never verified).
+    if (remaining === null || remaining > 0) process.exit(EXIT_DRAIN_INCOMPLETE);
     return;
   }
 
@@ -513,7 +516,8 @@ async function runDrain(
   } else {
     console.log(`[drain] extracted ${result.extracted} atom(s) across ${result.batches} batch(es); ${result.remaining ?? '?'} remaining (stopped: ${result.stopped})`);
   }
-  if ((result.remaining ?? 0) > 0) process.exit(EXIT_DRAIN_INCOMPLETE);
+  // null remaining = the final count query failed; do not report success.
+  if (result.remaining === null || result.remaining > 0) process.exit(EXIT_DRAIN_INCOMPLETE);
 }
 
 export async function runDream(engine: BrainEngine | null, args: string[]): Promise<CycleReport | void> {

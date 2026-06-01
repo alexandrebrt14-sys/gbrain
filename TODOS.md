@@ -1,17 +1,30 @@
 # TODOS
 
-## v0.41.39.0 watchdog / pooler-reap / lens-backlog follow-ups (v0.42+)
+## v0.42.2.0 watchdog / pooler-reap / lens-backlog follow-ups (v0.42+)
 
-Deferred from the v0.41.39.0 wave (issue #1678). The shipped fixes are complete
+Deferred from the v0.42.2.0 wave (issue #1678). The shipped fixes are complete
 and tested; these are documented tradeoffs and stronger-but-bigger versions.
 
-- [ ] **P2 — `claim` idempotent recovery.** v0.41.39.0 deliberately does NOT
+- [ ] **P2 — `claim` idempotent recovery.** v0.42.2.0 deliberately does NOT
   inline-retry `claim` (a retry after the `UPDATE...RETURNING` committed but the
   socket died could double-claim a job); instead the worker poll loop reconnects
-  and re-claims on the next tick. The stronger fix: after a reconnect, look up an
-  active job already holding this worker's `lock_token` before claiming a new one,
-  so a committed-but-unreturned claim is recovered rather than abandoned for the
-  stall detector. Needs the claim path to thread the lock_token through recovery.
+  and re-claims on the next tick. Codex independently flagged the residual: if
+  claim's UPDATE commits but the connection dies before `RETURNING` reaches the
+  worker, that job is `active` in the DB but absent from `inFlight` (orphaned). It
+  is NOT lost — the stall detector reclaims it once `lock_until` expires (~one
+  lock-duration + stall-interval, ~60s) and requeues it (stalled_counter 0 → first
+  stall requeues, not dead-letters). The stronger fix: after a reconnect, look up
+  an active job already holding this worker's `lock_token` before claiming a new
+  one, so the orphan is recovered immediately instead of after a stall cycle.
+  Needs the claim path to thread the lock_token through recovery.
+- [ ] **P3 — `dream --drain` PGLite lock-path parity.** The drain takes the DB
+  refreshing lock (`cycleLockIdFor`), which is the correct lock the routine cycle
+  uses on Postgres. On PGLite the routine cycle uses the global FILE lock instead,
+  so the drain's DB lock doesn't contend with it. This is currently moot because
+  PGLite's exclusive single-process file lock means a separate `gbrain dream
+  --drain` process can't even open the brain while autopilot's `gbrain dream`
+  holds it (one fails at connect). If PGLite ever gains multi-handle access,
+  the drain must also acquire the cycle file lock. Codex-flagged; low risk today.
 - [ ] **P2 — `synthesize_concepts_backlog` doctor check.** The `extract_atoms`
   backlog check shipped; `synthesize_concepts` did not, because that phase is a
   stub with no real eligibility predicate (a NOT-EXISTS analog to atom
