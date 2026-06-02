@@ -18,7 +18,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { parseEditsResponse, runReflect } from '../../src/core/skillopt/reflect.ts';
+import { parseEditsResponse, runReflect, runOneShotRewrite } from '../../src/core/skillopt/reflect.ts';
 import type { ChatOpts, ChatResult } from '../../src/core/ai/gateway.ts';
 import type { ScoredRollout, Trajectory } from '../../src/core/skillopt/types.ts';
 
@@ -285,5 +285,45 @@ describe('runReflect (D7 two-call contract)', () => {
 
     expect(observedUserMsg).toContain('PREVIOUSLY REJECTED EDITS');
     expect(observedUserMsg).toContain('validation_gate_below_baseline');
+  });
+});
+
+// ─── runOneShotRewrite (cat31 config C baseline) ────────────────────────────
+
+function oneShotChatStub(text: string): NonNullable<Parameters<typeof runOneShotRewrite>[0]['chatFn']> {
+  return (async (_opts: ChatOpts): Promise<ChatResult> => ({
+    text,
+    blocks: [{ type: 'text', text }],
+    stopReason: 'end',
+    usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+    model: 'm',
+    providerId: 'anthropic',
+  })) as NonNullable<Parameters<typeof runOneShotRewrite>[0]['chatFn']>;
+}
+
+const ONE_SHOT_BASE = { skillBodyText: '# Skill', successes: [] as ScoredRollout[], failures: [] as ScoredRollout[], rejected: [], optimizerModel: 'm' };
+
+describe('runOneShotRewrite', () => {
+  test('unwraps a whole-response code fence', async () => {
+    const body = '# Skill\n\n## People\nList people.';
+    const r = await runOneShotRewrite({ ...ONE_SHOT_BASE, chatFn: oneShotChatStub('```markdown\n' + body + '\n```') });
+    expect(r.newBody).toBe(body);
+    expect(r.error).toBeUndefined();
+  });
+
+  test('preserves an EMBEDDED code fence — does not truncate to the first block', async () => {
+    const body = '# Skill\n\nRun this:\n```bash\nls -la\n```\n\n## People\nList people.';
+    const r = await runOneShotRewrite({ ...ONE_SHOT_BASE, chatFn: oneShotChatStub(body) });
+    expect(r.newBody).toBe(body);
+    expect(r.newBody).toContain('## People'); // regression: old non-anchored regex truncated to the bash block
+  });
+
+  test('chat error returns empty newBody + error (caller treats as no-change)', async () => {
+    const r = await runOneShotRewrite({
+      ...ONE_SHOT_BASE,
+      chatFn: (async () => { throw new Error('boom'); }) as NonNullable<Parameters<typeof runOneShotRewrite>[0]['chatFn']>,
+    });
+    expect(r.newBody).toBe('');
+    expect(r.error).toContain('one_shot_rewrite_failed');
   });
 });
