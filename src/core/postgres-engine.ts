@@ -1486,8 +1486,9 @@ export class PostgresEngine implements BrainEngine {
     // by multiplying the chunk-grain ts_rank with a source-factor CASE.
     // Detail-gated — disabled for `detail='high'` (temporal queries) so
     // chat surfaces normally for date-framed lookups. Hard-exclude prefixes
-    // (test/, archive/, attachments/, .raw/ by default) filter at the
-    // chunk-rank stage so they never enter the candidate set.
+    // (test/, attachments/, .raw/ by default) filter at the chunk-rank stage
+    // so they never enter the candidate set. (archive/ is demoted, not
+    // excluded — issue #1777.)
     const boostMap = resolveBoostMap();
     const sourceFactorCase = buildSourceFactorCase('p.slug', boostMap, opts?.detail);
     const hardExcludePrefixes = resolveHardExcludes(opts?.exclude_slug_prefixes, opts?.include_slug_prefixes);
@@ -1989,8 +1990,9 @@ export class PostgresEngine implements BrainEngine {
         // (postgres.js's own connection-replacement covers that case).
         // Fail-loud per retry.ts contract: a reconnect throw propagates
         // as the real cause, replacing the symptomatic
-        // "No database connection" error.
-        reconnect: () => this.reconnect(),
+        // "No database connection" error. ctx carries the triggering error so
+        // reconnect() can classify reap-vs-other for the pool-recovery audit.
+        reconnect: (ctx) => this.reconnect(ctx),
       });
     } catch (err) {
       // Distinguish "retries exhausted" (a retryable error that ran out of
@@ -4775,27 +4777,32 @@ export class PostgresEngine implements BrainEngine {
   }
 
   /**
-   * Reconnect the engine after a transient connection blip.
+   * Reconnect the engine after a transient connection blip. Branches on
+   * connection style; no-ops if no saved config or if already reconnecting.
    *
-   * v0.42.20.0 (#1745): branch on connection style.
+   * - MODULE-singleton engines SHARE `db.ts`'s `sql` (#1745). Calling
+   *   `db.disconnect()` here (via `this.disconnect()`) would null it out from
+   *   under EVERY concurrent op (other dream-cycle phases, minion-queue
+   *   `promoteDelayed`), which then throw "connect() has not been called" in the
+   *   disconnect→connect window. postgres.js already auto-replaces dead sockets
+   *   inside its pool, so a transient blip recovers WITHOUT a teardown. Recover
+   *   idempotently instead: `db.connect()` is a no-op when the singleton is alive
+   *   (the common case) and re-establishes it only if some other path nulled it —
+   *   never introducing a null window — then refreshes the ConnectionManager read
+   *   pool. Scope: fixes the singleton-NULL-window bug specifically; it does NOT
+   *   rebuild a genuinely WEDGED-but-live pool (db.connect() no-ops there) — a
+   *   different failure mode postgres.js owns.
    *
    * - INSTANCE pools (worker engines, `poolSize` set) own their `_sql` — tearing
-   *   it down and rebuilding is correct and isolated; nobody else shares it.
-   *
-   * - MODULE-singleton engines SHARE `db.ts`'s `sql`. Calling `db.disconnect()`
-   *   here (via `this.disconnect()`) nulls it out from under EVERY concurrent op
-   *   (other dream-cycle phases, minion-queue `promoteDelayed`), which then throw
-   *   "connect() has not been called" in the disconnect→connect window. postgres.js
-   *   already auto-replaces dead sockets inside its pool, so a transient blip
-   *   recovers WITHOUT a teardown. Recover idempotently instead: `db.connect()`
-   *   is a no-op when the singleton is alive (the common case) and re-establishes
-   *   it only if some other path nulled it — never introducing a null window.
-   *
-   * Scope: this fixes the singleton-NULL-window bug specifically. It does NOT
-   * rebuild a genuinely WEDGED-but-live pool (db.connect() no-ops there); that is
-   * a different failure mode postgres.js owns.
+   *   it down and rebuilding is correct and isolated; nobody else shares it. This
+   *   path also records a pool-recovery audit event (#1685 GAP B) so the
+   *   `pool_reap_health` doctor check can answer "reaped N times AND not
+   *   auto-recovering." `ctx.error` (threaded by retry.ts) is classified: a
+   *   CONNECTION_ENDED match is a true pooler reap; anything else (or no error,
+   *   e.g. the supervisor's health-check reconnect) is `reconnect_other`. All
+   *   audit calls are best-effort and never block the reconnect (CODEX #8).
    */
-  async reconnect(): Promise<void> {
+  async reconnect(ctx?: { error?: unknown }): Promise<void> {
     if (!this._savedConfig || this._reconnecting) return;
     if (this._connectionStyle !== 'instance') {
       // Module-singleton: never tear down the shared pool. db.connect() is
@@ -4813,10 +4820,33 @@ export class PostgresEngine implements BrainEngine {
       return;
     }
     this._reconnecting = true;
+
+    let isReap = false;
+    if (ctx?.error !== undefined) {
+      try {
+        const { isConnectionEndedError } = await import('./retry-matcher.ts');
+        isReap = isConnectionEndedError(ctx.error);
+      } catch { /* classification is best-effort */ }
+    }
+    try {
+      const { logPoolRecovery } = await import('./audit/pool-recovery-audit.ts');
+      logPoolRecovery(isReap ? 'reap_detected' : 'reconnect_other', ctx?.error);
+    } catch { /* audit is best-effort */ }
+
     try {
       // Instance pool: tear down old pool (best-effort — it may already be dead).
       try { await this.disconnect(); } catch { /* swallow */ }
       await this.connect(this._savedConfig);
+      try {
+        const { logPoolRecovery } = await import('./audit/pool-recovery-audit.ts');
+        logPoolRecovery('reconnect_succeeded');
+      } catch { /* best-effort */ }
+    } catch (err) {
+      try {
+        const { logPoolRecovery } = await import('./audit/pool-recovery-audit.ts');
+        logPoolRecovery('reconnect_failed', err);
+      } catch { /* best-effort */ }
+      throw err;
     } finally {
       this._reconnecting = false;
     }
