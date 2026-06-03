@@ -149,13 +149,16 @@ describe('issue #1801 — supervisor wedge decision logic', () => {
     expect(h.getRestartCalls()).toBe(1);
   });
 
-  it('loop budget (>=) stops restarting and emits wedge_restart_loop (Codex #13)', async () => {
+  it('loop budget (>=) stops restarting and emits wedge_restart_loop ONCE (Codex #13 + loop-spam fix)', async () => {
     const h = makeSup({ row: WEDGE_ROW, wedgeRestartChecks: 1, wedgeRestartLoopBudget: 2 });
     await h.sup._healthCheckOnceForTests(); // restart 1 (timestamps: 0 < 2 → push)
     await h.sup._healthCheckOnceForTests(); // restart 2 (timestamps: 1 < 2 → push)
     await h.sup._healthCheckOnceForTests(); // budget: 2 >= 2 → no restart, loop warn
+    await h.sup._healthCheckOnceForTests(); // still exhausted → MUST NOT re-warn
+    await h.sup._healthCheckOnceForTests(); // still exhausted → MUST NOT re-warn
     expect(h.getRestartCalls()).toBe(2);
-    expect(h.events.some((e) => e.event === 'health_warn' && e.reason === 'wedge_restart_loop')).toBe(true);
+    const loopWarns = h.events.filter((e) => e.event === 'health_warn' && e.reason === 'wedge_restart_loop');
+    expect(loopWarns.length).toBe(1); // fired once on entry, not every tick (no audit flood)
   });
 
   it('null last_completed_claimable wedges only after the startup grace', async () => {

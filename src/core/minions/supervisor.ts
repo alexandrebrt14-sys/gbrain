@@ -262,6 +262,10 @@ export class MinionSupervisor {
   private consecutiveWedgedChecks = 0;
   /** Timestamps of recent wedge restarts (loop-breaker window). */
   private wedgeRestartTimestamps: number[] = [];
+  /** Whether the `wedge_restart_loop` give-up alert has already fired for the
+   *  current exhausted window — so it emits once, not every health tick. Re-arms
+   *  when a real restart fires again (window drained below budget). */
+  private wedgeLoopAlerted = false;
   /** True while a restartCurrentChild() is in flight (suppresses re-escalation). */
   private escalationInFlight = false;
   /** Wall-clock of the most recent child spawn (startup-grace anchor). */
@@ -617,9 +621,10 @@ export class MinionSupervisor {
       delete env.GBRAIN_ALLOW_SHELL_JOBS;
     }
     // Signal to the child worker that it's running under a supervisor.
-    // The worker's self-health-check (DB probes, stall detection) is
-    // redundant when the supervisor already provides these — setting
-    // this env var causes the worker to skip its own health timer.
+    // issue #1801: the worker's DB-liveness probe STILL runs under supervision
+    // (it's the only "is MY pool dead" signal; the supervisor watches a
+    // different connection). This env var only makes the worker skip its STALL
+    // detection — the supervisor's progress watchdog owns forward-progress.
     env.GBRAIN_SUPERVISED = '1';
 
     this.childSupervisor = new ChildWorkerSupervisor({
@@ -880,16 +885,27 @@ export class MinionSupervisor {
     // `>=` so the budget is a real ceiling (the Nth restart is the last allowed,
     // not the N+1th) — issue #1801 Codex #13.
     if (this.wedgeRestartTimestamps.length >= this.opts.wedgeRestartLoopBudget) {
-      this.emit('health_warn', {
-        reason: 'wedge_restart_loop',
-        count: this.wedgeRestartTimestamps.length,
-        window_ms: this.opts.wedgeRestartLoopWindowMs,
-        waiting_claimable: waitingClaimable,
-        queue: this.opts.queue,
-      });
+      // Give up restarting (restart isn't fixing it). Alert ONCE on entry to
+      // the exhausted state — without this flag the wedge predicate re-fires
+      // every health tick for the whole window and floods the audit log with
+      // identical `wedge_restart_loop` warns. Reset the counter so the predicate
+      // doesn't busy-spin; the flag re-arms below once a real restart fires
+      // again (window drained below budget).
+      if (!this.wedgeLoopAlerted) {
+        this.wedgeLoopAlerted = true;
+        this.emit('health_warn', {
+          reason: 'wedge_restart_loop',
+          count: this.wedgeRestartTimestamps.length,
+          window_ms: this.opts.wedgeRestartLoopWindowMs,
+          waiting_claimable: waitingClaimable,
+          queue: this.opts.queue,
+        });
+      }
+      this.consecutiveWedgedChecks = 0;
       return;
     }
 
+    this.wedgeLoopAlerted = false; // re-arm: window has room, we're restarting
     this.wedgeRestartTimestamps.push(now);
     this.consecutiveWedgedChecks = 0;
     this.escalationInFlight = true;

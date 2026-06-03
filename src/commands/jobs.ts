@@ -555,7 +555,13 @@ HANDLER TYPES (built in)
       {
         const w = stats.wedge;
         const mins = w.minutes_since_completion;
-        const wedged = w.active_healthy === 0 && w.waiting > 0 && (mins === null || mins > 15);
+        // Same threshold the doctor `wedged_queue` check uses, so the two
+        // advisory surfaces agree (issue #1801).
+        const wedgeMins = (() => {
+          const raw = parseInt(process.env.GBRAIN_WEDGED_QUEUE_WARN_MINUTES ?? '', 10);
+          return Number.isFinite(raw) && raw > 0 ? raw : 15;
+        })();
+        const wedged = w.active_healthy === 0 && w.waiting > 0 && (mins === null || mins > wedgeMins);
         if (wedged) {
           const since = mins === null ? 'no completions on record' : `${mins}m since last completion`;
           console.log(
