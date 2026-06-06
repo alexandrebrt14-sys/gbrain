@@ -1,5 +1,47 @@
 # TODOS
 
+## gbrain#1861 JSONB batch-insert follow-ups (v0.42+)
+
+Filed from the #1861 fix (batch inserts migrated from `unnest(${arr}::text[])` to
+`jsonb_to_recordset` to stop the "malformed array literal" crash on free-text
+context). Deliberately scoped OUT of that PR. See plan + GSTACK REVIEW REPORT at
+`~/.claude/plans/system-instruction-you-are-working-velvety-garden.md`.
+
+- [ ] **P3 — Element-isolation fallback for batch inserts.** On a non-retryable
+  batch error, retry the batch element-by-element so one bad row can't abort a
+  353K-page `extract --stale` sweep, logging the offending `(from_slug, context)`
+  instead of dying. The durable JSONB fix removed the known crash class (malformed
+  array literal) and NUL-stripping removed the other known jsonb-parse failure, so
+  there is no remaining data-dependent crash for this to catch *today* — it's
+  belt-and-suspenders against unknown future per-row failures. Wire it in
+  `addLinksBatch`/`addTimelineEntriesBatch`/`addTakesBatch` (or in `batchRetry` as
+  a post-classification fallback). Issue #1861 option 2.
+
+- [ ] **P3 — Audit remaining `unnest(${arr}::text[])` write sites.** `setPageAliases`
+  (alias_norm) and `addCodeEdges` (symbol-qualified names + `metas::jsonb[]`) still
+  bind through text-array literals. They carry normalized identifiers / symbol names,
+  not free prose, so the crash risk is far lower than calendar context — but they are
+  the same bug class and a hostile alias/symbol (or an embedded NUL) could still trip
+  them. Migrate to `jsonb_to_recordset` via the shared `batch-rows.ts` pattern if/when
+  one is observed failing, or proactively for completeness. `markPagesExtractedBatch`
+  is NOT in this set (slugs/source-ids/timestamps only — no free text).
+
+
+- [ ] **P3 — Single-source the batch INSERT SQL strings.** After #1861 the
+  links/timeline/takes `INSERT ... jsonb_to_recordset(($1::jsonb)->'rows')` SQL is
+  byte-identical between `postgres-engine.ts` and `pglite-engine.ts` (row builders already
+  hoisted to `batch-rows.ts`, but the SQL text is still duplicated). Hoist the three SQL
+  strings into exported constants in `batch-rows.ts` so a recordset column added to one
+  engine can't silently drift from the other. `test/e2e/engine-parity.test.ts` pins
+  behavior; a shared constant prevents drift at edit time. (Maintainability specialist.)
+
+- [ ] **P3 — Backfill batch-insert edge-case tests.** Edges sharing already-covered helper
+  code but lacking direct assertions: (a) `addTakesBatch` retries on an injected retryable
+  error + AbortSignal aborts (the `batchRetry` wrap is proven for links/timeline; takes
+  inherits the identical wrapper but isn't exercised directly); (b) `addTakesBatch`
+  intra-batch duplicate `(page_id,row_num)` rejects under `ON CONFLICT DO UPDATE`
+  (comment-claimed, unasserted). (Testing specialist.)
+
 ## v0.42.21.0 module-singleton ownership follow-ups (v0.42+)
 
 Filed from the v0.42.21.0 wave (#1404/#1471/#1619 — the dream-cycle
