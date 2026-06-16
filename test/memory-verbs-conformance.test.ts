@@ -44,6 +44,7 @@ import {
   __setEmbedTransportForTests,
 } from '../src/core/ai/gateway.ts';
 import { __setUsageLogPathForTests } from '../src/core/verbs/usage-log.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
 let home: string;
@@ -295,11 +296,12 @@ describe('synthesize — marked expensive + unavailable conversion [c10]', () =>
   });
 
   it('delegates to runThink and returns the frozen envelope with a priced cost block (chat seam — no real LLM)', async () => {
-    // Hermetic: the chat transport seam answers deterministically. (The
-    // keyless `unavailable` conversion [c10] is covered end-to-end by the CI
-    // conformance step, which runs `protocol conformance --synthesize` in a
-    // credential-free environment — a unit-level trigger here would depend on
-    // the developer machine NOT having keys, the opposite of hermetic.)
+    // Fully hermetic regardless of the dev/CI machine's ambient credentials:
+    // runThink builds its client via a real-key check (hasAnthropicKey reads
+    // process.env), NOT the gateway chat seam — so we must BOTH provide a fake
+    // key via withEnv (so the client builds) AND install the chat seam (so no
+    // real API call fires). Without the env key, CI (credential-free) takes the
+    // NO_ANTHROPIC_API_KEY path → the verb's `unavailable` conversion → isError.
     __setChatTransportForTests(async () => ({
       text: JSON.stringify({ answer: 'Synthesized test answer.', citations: [], gaps: ['none'] }),
       blocks: [],
@@ -308,7 +310,9 @@ describe('synthesize — marked expensive + unavailable conversion [c10]', () =>
       model: 'anthropic:claude-haiku-4-5-20251001',
       providerId: 'anthropic',
     }));
-    const { isError, body } = await callRemote('synthesize', { question: 'what do we know?' });
+    const { isError, body } = await withEnv({ ANTHROPIC_API_KEY: 'sk-test-hermetic' }, async () =>
+      callRemote('synthesize', { question: 'what do we know?' }),
+    );
     expect(isError).toBe(false);
     expect(body.answer).toBe('Synthesized test answer.');
     expect(body.protocol_version).toBe(1);

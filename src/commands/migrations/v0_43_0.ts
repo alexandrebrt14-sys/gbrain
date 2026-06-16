@@ -18,11 +18,11 @@ import type { Migration, OrchestratorOpts, OrchestratorResult } from './types.ts
 
 async function orchestrator(_opts: OrchestratorOpts): Promise<OrchestratorResult> {
   // No schema/data work — MEMORY_VERBS v1 is a façade over existing tables.
-  return { version: '0.43.0.0', status: 'complete', phases: [] };
+  return { version: '0.43.0', status: 'complete', phases: [] };
 }
 
 export const v0_43_0: Migration = {
-  version: '0.43.0.0',
+  version: '0.43.0',
   featurePitch: {
     headline:
       'Five memory verbs — recall, remember, entity, synthesize, forget — are now the agent-facing memory protocol (MEMORY_VERBS v1).',
