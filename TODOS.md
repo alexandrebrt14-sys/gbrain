@@ -129,12 +129,13 @@ Deferred from the v0.42.41.0 fix wave (eng-reviewed as separate scope, not hotfi
 See plan + GSTACK REVIEW REPORT at
 `~/.claude/plans/system-instruction-you-are-working-zany-thacker.md`.
 
-- [ ] **P1 — supervisor: retry-with-backoff instead of hard stop on transient DB outages (#1994).**
+- [x] **P1 — supervisor: retry-with-backoff instead of hard stop on transient DB outages (#1994).**
   `max_crashes_exceeded` gives up permanently; a transient pooler blip that trips the
   counter wedges the supervisor until manual restart. **Why:** the #2034 reconnect fix
   makes the engine recover, but the supervisor still hard-stops. **Where:**
   `src/core/minions/supervisor.ts` crash-count loop — add exponential backoff with a
   much higher (or no) permanent-give-up threshold for recoverable errors.
+  **Completed:** v0.42.50.0 (2026-06-17) — degraded retry at the soft budget, capped backoff, hard ceiling `GBRAIN_SUPERVISOR_HARD_STOP_CRASHES` (#2227 wave).
 - [ ] **P2 — PGLite `reindex-frontmatter` / backfill statement_timeout boost (#1963).**
   Community RCA: `SET LOCAL statement_timeout` is gated on `engine.kind === 'postgres'`,
   so PGLite inherits the 30s session default and trips on non-trivial batches; the CLI
@@ -671,7 +672,7 @@ and tested; these are documented tradeoffs and stronger-but-bigger versions.
 Deferred from the v0.41.38.0 wave (code-callers/callees pin + dream-on-postgres).
 Documented tradeoffs, not blockers — the shipped bug fixes are complete and tested.
 
-- [ ] **P1 — Per-source autopilot fan-out passes the global repoPath.**
+- [x] **P1 — Per-source autopilot fan-out passes the global repoPath.**
   `src/commands/autopilot-fanout.ts:~206` submits every per-source `autopilot-cycle`
   job with `repoPath: opts.repoPath` (the global checkout), not `src.local_path`.
   With v0.41.38.0's `cycleSourceId = opts.sourceId ?? resolveSourceForDir(...)`,
@@ -683,6 +684,7 @@ Documented tradeoffs, not blockers — the shipped bug fixes are complete and te
   resolve brainDir from the source's `local_path` inside the `autopilot-cycle`
   handler when `source_id` is set (mirror dream.ts's T1), so FS and DB phases agree.
   Needs its own review (touches the deferred autopilot path).
+  **Completed:** v0.42.50.0 (2026-06-17) — handler resolves brainDir from `source.local_path` (null for pure-DB sources, never the global repo); prerequisite for the cycle split + cooldown (#2194/#2227 wave).
 - [ ] **P2 — `.gbrain-source` with invalid SYNTAX still falls through silently.**
   `readDotfileWalk` (source-resolver.ts:39) intentionally skips a dotfile whose
   content fails `isValidSourceId` (e.g. `repo_a` with an underscore) per the v0.31.8
