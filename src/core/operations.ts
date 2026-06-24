@@ -5229,6 +5229,58 @@ const volunteer_chronicle: Operation = {
   cliHints: { name: 'orient' },
 };
 
+const chronicle_backfill: Operation = {
+  name: 'chronicle_backfill',
+  description:
+    'Life Chronicle: sweep existing meeting/conversation/calendar pages into timeline events by ' +
+    'enqueuing chronicle_extract jobs (one per eligible page). --dry-run counts without enqueuing. ' +
+    'Local-only bulk op. CLI: `gbrain chronicle-backfill [--since YYYY-MM-DD] [--limit N] [--dry-run]`.',
+  scope: 'admin',
+  mutating: true,
+  localOnly: true,
+  params: {
+    since: { type: 'string', description: 'Only pages updated on/after this date (YYYY-MM-DD).' },
+    limit: { type: 'number', description: 'Max pages per type to sweep (default 1000).' },
+    dry_run: { type: 'boolean', description: 'Count eligible pages without enqueuing.' },
+  },
+  handler: async (ctx, p) => {
+    const { isChronicleEligible } = await import('./chronicle/eligibility.ts');
+    const TYPES = ['meeting', 'conversation', 'calendar-event'] as const;
+    const limit = typeof p.limit === 'number' ? p.limit : 1000;
+    const updated_after = typeof p.since === 'string' ? p.since : undefined;
+    const dryRun = p.dry_run === true;
+    const scope = sourceScopeOpts(ctx);
+    type QueueLike = { add: (n: string, d: Record<string, unknown>) => Promise<unknown> };
+    let queue: QueueLike | null = null;
+    if (!dryRun) {
+      const { MinionQueue } = await import('./minions/queue.ts');
+      queue = new MinionQueue(ctx.engine) as unknown as QueueLike;
+    }
+    let scanned = 0, eligible = 0, enqueued = 0;
+    const errors: { slug: string; error: string }[] = [];
+    for (const type of TYPES) {
+      const pages = await ctx.engine.listPages({ type, updated_after, limit, ...scope });
+      for (const page of pages) {
+        scanned++;
+        const dreamGenerated = (page.frontmatter as Record<string, unknown> | undefined)?.dream_generated === true;
+        const elig = isChronicleEligible({ type: page.type, slug: page.slug, body: page.compiled_truth, dreamGenerated });
+        if (!elig.ok) continue;
+        eligible++;
+        if (dryRun || !queue) continue;
+        try {
+          await queue.add('chronicle_extract', { slug: page.slug, sourceId: ctx.sourceId ?? 'default' });
+          enqueued++;
+        } catch (e) {
+          // Never swallow — surface per-page failures (the #2057 no-swallow pattern).
+          errors.push({ slug: page.slug, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+    }
+    return { scanned, eligible, enqueued, dry_run: dryRun, errors };
+  },
+  cliHints: { name: 'chronicle-backfill' },
+};
+
 export const operations: Operation[] = [
   // Page CRUD
   get_page, put_page, delete_page, list_pages,
@@ -5282,7 +5334,7 @@ export const operations: Operation[] = [
   // v0.42.x (#2390): Life Chronicle timeline reads
   chronicle_day, chronicle_since, chronicle_last_seen,
   ontology_get, ontology_propose, ontology_dimensions, ontology_conflicts,
-  volunteer_chronicle,
+  volunteer_chronicle, chronicle_backfill,
   // v0.43 (#2095): push-based context
   volunteer_context,
   // v0.31: hot memory (facts table)
